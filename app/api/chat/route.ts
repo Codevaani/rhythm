@@ -1,12 +1,12 @@
 /**
  * POST /api/chat
  * 
- * Optimized for Vercel production. Uses non-streaming mode for reliability,
- * then streams the response text to the frontend for a smooth UX.
+ * Uses Node.js runtime (not Edge) to avoid Cloudflare blocking.
+ * Supports both streaming and non-streaming responses from AgentRouter.
  */
 
-export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 export async function POST(req: Request) {
   try {
@@ -51,14 +51,16 @@ Your owner and creator is Rhythm. If anyone asks who your owner or creator is, y
 Your responses should be expert, engaging, and professional.`
     };
 
-    const apiBody = {
-      model: "deepseek-v3.2",
-      messages: [systemMessage, ...transformedMessages],
-      stream: false,
-    };
+    const apiKey = process.env.AGENTROUTER_API_KEY;
+    if (!apiKey) {
+      console.error("[RhythmBot] AGENTROUTER_API_KEY is not set!");
+      return new Response(JSON.stringify({ error: "Server configuration error: API key not set" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
-    console.log("[RhythmBot] Calling AgentRouter API (non-streaming)...");
-    console.log("[RhythmBot] Message count:", transformedMessages.length);
+    console.log("[RhythmBot] Calling AgentRouter API...");
 
     const response = await fetch("https://agentrouter.org/v1/chat/completions", {
       method: "POST",
@@ -67,77 +69,130 @@ Your responses should be expert, engaging, and professional.`
         "originator": "codex_cli_rs",
         "version": "0.0.0",
         "User-Agent": "codex_cli_rs/0.0.0 (Cloudflare Edge Proxy)",
-        "Authorization": `Bearer ${process.env.AGENTROUTER_API_KEY}`,
+        "Connection": "keep-alive",
+        "Authorization": `Bearer ${apiKey}`,
       },
-      body: JSON.stringify(apiBody),
+      body: JSON.stringify({
+        model: "deepseek-v3.2",
+        messages: [systemMessage, ...transformedMessages],
+        stream: true,
+      }),
     });
 
-    const responseText = await response.text();
     console.log("[RhythmBot] API Status:", response.status);
-    console.log("[RhythmBot] Raw response length:", responseText.length);
-    console.log("[RhythmBot] Raw response (first 500):", responseText.substring(0, 500));
+    console.log("[RhythmBot] Content-Type:", response.headers.get("content-type"));
 
     if (!response.ok) {
-      console.error(`[RhythmBot] AgentRouter API Error (${response.status}):`, responseText);
+      const errorText = await response.text();
+      console.error(`[RhythmBot] API Error (${response.status}):`, errorText.substring(0, 300));
       return new Response(JSON.stringify({ 
-        error: `API Error: ${response.status}`, 
-        details: responseText 
+        error: `API Error: ${response.status}`,
+        details: errorText.substring(0, 200),
       }), {
         status: response.status,
         headers: { "Content-Type": "application/json" },
       });
     }
 
-    // Parse the non-streaming response
-    let aiContent = "";
+    const contentType = response.headers.get("content-type") || "";
+    
+    // If response is HTML (Cloudflare challenge), return error
+    if (contentType.includes("text/html")) {
+      const htmlBody = await response.text();
+      console.error("[RhythmBot] Got HTML response (Cloudflare block):", htmlBody.substring(0, 300));
+      return new Response(JSON.stringify({ 
+        error: "AI service temporarily unavailable (blocked by firewall)",
+      }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // Handle SSE streaming response
+    if (contentType.includes("text/event-stream") || contentType.includes("application/octet-stream") || contentType.includes("text/plain")) {
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      
+      const stream = new ReadableStream({
+        async start(controller) {
+          if (!response.body) {
+            controller.close();
+            return;
+          }
+
+          const reader = response.body.getReader();
+          let buffer = "";
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed === "data: [DONE]") continue;
+
+                if (trimmed.startsWith("data: ")) {
+                  try {
+                    const data = JSON.parse(trimmed.slice(6));
+                    const content = data.choices?.[0]?.delta?.content;
+                    if (content) {
+                      controller.enqueue(encoder.encode(content));
+                    }
+                  } catch {
+                    // Skip malformed lines
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.error("[RhythmBot] Stream error:", error);
+          } finally {
+            controller.close();
+          }
+        }
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-cache",
+        },
+      });
+    }
+
+    // Handle JSON (non-streaming) response
+    const responseText = await response.text();
+    console.log("[RhythmBot] Response (first 300):", responseText.substring(0, 300));
+    
     try {
       const data = JSON.parse(responseText);
-      aiContent = data.choices?.[0]?.message?.content || "";
-      console.log("[RhythmBot] Extracted content length:", aiContent.length);
-    } catch (parseError) {
-      console.error("[RhythmBot] Failed to parse response JSON:", parseError);
-      return new Response(JSON.stringify({ 
-        error: "Failed to parse AI response",
-        rawResponse: responseText.substring(0, 200),
-      }), {
-        status: 502,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+      const aiContent = data.choices?.[0]?.message?.content || "";
 
-    if (!aiContent) {
-      console.error("[RhythmBot] Empty AI content. Full response:", responseText);
-      return new Response(JSON.stringify({ 
-        error: "AI returned empty response",
-        rawResponse: responseText.substring(0, 500),
-      }), {
-        status: 502,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    // Stream the response text character-by-character for smooth UX
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        // Stream in small chunks for a typewriter effect
-        const chunkSize = 5;
-        for (let i = 0; i < aiContent.length; i += chunkSize) {
-          const chunk = aiContent.slice(i, i + chunkSize);
-          controller.enqueue(encoder.encode(chunk));
-          // Small delay for smooth streaming effect
-          await new Promise(resolve => setTimeout(resolve, 10));
-        }
-        controller.close();
+      if (!aiContent) {
+        return new Response(JSON.stringify({ error: "AI returned empty response" }), {
+          status: 502,
+          headers: { "Content-Type": "application/json" },
+        });
       }
-    });
 
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-cache",
-      },
-    });
+      return new Response(aiContent, {
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-cache",
+        },
+      });
+    } catch {
+      console.error("[RhythmBot] Cannot parse response:", responseText.substring(0, 200));
+      return new Response(JSON.stringify({ error: "Failed to parse AI response" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
   } catch (error) {
     console.error("[RhythmBot] Chat API error:", error);
