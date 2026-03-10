@@ -66,9 +66,12 @@ Your responses should be expert, engaging, and professional.`
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
         "originator": "codex_cli_rs",
         "version": "0.0.0",
-        "User-Agent": "codex_cli_rs/0.0.0 (Cloudflare Edge Proxy)",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
         "Connection": "keep-alive",
         "Authorization": `Bearer ${apiKey}`,
       },
