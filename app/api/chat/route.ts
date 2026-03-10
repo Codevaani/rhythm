@@ -67,7 +67,7 @@ Your responses should be expert, engaging, and professional.`
         "originator": "codex_cli_rs",
         "version": "0.0.0",
         "User-Agent": "codex_cli_rs/0.0.0 (Cloudflare Edge Proxy)",
-        "Authorization": "Bearer sk-Hrf498X79ccfLbzB7D3E1EFb7FI8KOIzAcfdCX1xNYEddBy2",
+        "Authorization": `Bearer ${process.env.AGENTROUTER_API_KEY}`,
       },
       body: JSON.stringify(apiBody),
     });
